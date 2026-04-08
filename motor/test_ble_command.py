@@ -1,129 +1,150 @@
 import asyncio
-from bleak import BleakClient
+from bleak import BleakClient, BleakScanner
 
-# Device details
-DEVICE_NAME = "JW-aLRA-BA03"
-DEVICE_ADDRESS = "C8:46:82:00:2E:FA"
+ 
+DEVICE_NAME = "JW-aLRA-A4D7"
+DEVICE_ADDRESS = "C8:46:82:00:2F:A9"
 
-# Common BLE UUIDs (you may need to adjust these based on your device)
-# These are standard for many serial-over-BLE devices
-SERVICE_UUID = "00001101-0000-1000-8000-00805f9b34fb"  # Serial Port Service
-CHAR_UUID_TX = "00002a37-0000-1000-8000-00805f9b34fb"  # TX Characteristic
-CHAR_UUID_RX = "00002a37-0000-1000-8000-00805f9b34fb"  # RX Characteristic
+# DEVICE_NAME = "JW-aLRA-BA03"
+# DEVICE_ADDRESS = "C8:46:82:00:2E:FA"
 
+# Vibration parameters (adjust as needed)
+FREQ = 150        # Hz, range: 20-500
+AMP1 = 80         # Amplitude effect 1, range: 1-127
+SET_ON_TIME = 20  # ON time in units of /10ms → 200ms
+SET_OFF_TIME = 10 # OFF time in units of /10ms → 100ms
+SET_ONE_CYC = 3   # Number of ON-OFF cycles per GO trigger
 
-async def connect_and_send_command():
-    """Connect to Bluetooth device and send a test command"""
-    
-    try:
-        print(f"尝试连接到设备: {DEVICE_NAME} ({DEVICE_ADDRESS})")
-        
-        async with BleakClient(DEVICE_ADDRESS) as client:
-            if client.is_connected:
-                print(f"✓ 已连接到 {DEVICE_NAME}\n")
-                
-                # Get all services and characteristics
-                print("设备的服务和特征值:")
-                print("-" * 50)
-                for service in client.services:
-                    print(f"服务: {service.uuid}")
-                    for char in service.characteristics:
-                        props = ", ".join(char.properties)
-                        print(f"  特征: {char.uuid}")
-                        print(f"    属性: {props}")
-                        print(f"    是否可读: {'read' in char.properties}")
-                        print(f"    是否可写: {'write' in char.properties}")
-                        print(f"    是否可通知: {'notify' in char.properties}")
-                
-                print("\n" + "-" * 50)
-                print("\n发送命令...")
-                
-                # Try to find a writable characteristic
-                writable_char = None
-                for service in client.services:
-                    for char in service.characteristics:
-                        if "write" in char.properties or "write-without-response" in char.properties:
-                            writable_char = char
-                            break
-                    if writable_char:
-                        break
-                
-                if writable_char:
-                    command = "WAKE_UP"
-                    print(f"发送命令: {command}")
-                    print(f"写入到特征: {writable_char.uuid}")
-                    
-                    # Send command as bytes
-                    await client.write_gatt_char(writable_char.uuid, command.encode('utf-8'))
-                    print("✓ 命令已发送\n")
-                    
-                    # Try to read response if there's a readable characteristic
-                    readable_char = None
-                    for service in client.services:
-                        for char in service.characteristics:
-                            if "read" in char.properties:
-                                readable_char = char
-                                break
-                        if readable_char:
-                            break
-                    
-                    if readable_char:
-                        print(f"尝试读取响应从特征: {readable_char.uuid}")
-                        try:
-                            await asyncio.sleep(0.5)  # Wait for response
-                            response = await client.read_gatt_char(readable_char.uuid)
-                            print(f"✓ 收到响应: {response}")
-                            print(f"  文本: {response.decode('utf-8', errors='ignore')}")
-                        except Exception as e:
-                            print(f"✗ 读取失败: {e}")
-                    else:
-                        print("没有找到可读的特征值")
-                
-                else:
-                    print("✗ 没有找到可写入的特征值")
-                    print("请检查设备支持的特征值")
-            
-            else:
-                print(f"✗ 无法连接到设备")
-    
-    except Exception as e:
-        print(f"✗ 错误: {e}")
-        print(f"\n排查建议:")
-        print(f"1. 检查设备地址是否正确: {DEVICE_ADDRESS}")
-        print(f"2. 确保设备已打开且处于配对模式")
-        print(f"3. 运行 ble.py 扫描附近设备")
+notification_log = []
 
+def notification_handler(sender, data):
+    msg = data.decode("utf-8", errors="ignore").strip()
+    print(f"  ← [{sender}] {msg}")
+    notification_log.append(msg)
 
-async def scan_and_test():
-    """Scan for device first, then connect"""
-    from bleak import BleakScanner
-    
-    print(f"正在扫描设备: {DEVICE_NAME} ({DEVICE_ADDRESS})\n")
-    
+async def send_cmd(client, char_uuid, cmd: str, delay=0.4):
+    """Send a text command and wait briefly for response."""
+    print(f"  → {cmd}")
+    await client.write_gatt_char(char_uuid, (cmd + "\r\n").encode("utf-8"), response=False)
+    await asyncio.sleep(delay)
+
+async def find_uart_char(client):
+    """
+    Find the writable+notify characteristic pair.
+    Prefers Nordic UART Service (NUS), falls back to first writable char.
+    """
+    NUS_RX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"  # write to this
+    NUS_TX = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"  # notifications from this
+
+    write_char = None
+    notify_char = None
+
+    for service in client.services:
+        for char in service.characteristics:
+            uuid = char.uuid.lower()
+            if uuid == NUS_RX:
+                write_char = char.uuid
+            if uuid == NUS_TX:
+                notify_char = char.uuid
+
+    # Fallback: scan all characteristics
+    if not write_char:
+        for service in client.services:
+            for char in service.characteristics:
+                props = char.properties
+                if not write_char and ("write" in props or "write-without-response" in props):
+                    write_char = char.uuid
+                if not notify_char and "notify" in props:
+                    notify_char = char.uuid
+
+    return write_char, notify_char
+
+async def vibrate():
+    print(f"Scanning for {DEVICE_NAME} ({DEVICE_ADDRESS})...")
     devices = await BleakScanner.discover(timeout=10.0)
-    
-    device_found = False
-    for device in devices:
-        if device.address.upper() == DEVICE_ADDRESS.upper():
-            print(f"✓ 找到设备: {device.name} ({device.address})\n")
-            device_found = True
-            break
-    
-    if not device_found:
-        print(f"✗ 未找到设备 {DEVICE_ADDRESS}")
-        print(f"找到的设备:")
-        for device in devices:
-            if device.name:
-                print(f"  - {device.name}: {device.address}")
+    found = any(d.address.upper() == DEVICE_ADDRESS.upper() for d in devices)
+    if not found:
+        print("✗ Device not found. Nearby devices:")
+        for d in devices:
+            if d.name:
+                print(f"  {d.name}: {d.address}")
         return
-    
-    # Connect and send command
-    await connect_and_send_command()
 
+    print(f"✓ Device found. Connecting...\n")
+
+    async with BleakClient(DEVICE_ADDRESS) as client:
+        if not client.is_connected:
+            print("✗ Connection failed.")
+            return
+
+        print("✓ Connected!\n")
+
+        write_char, notify_char = await find_uart_char(client)
+
+        if not write_char:
+            print("✗ No writable characteristic found.")
+            return
+
+        print(f"Write char : {write_char}")
+        print(f"Notify char: {notify_char}\n")
+
+        # Subscribe to notifications
+        if notify_char:
+            await client.start_notify(notify_char, notification_handler)
+
+        # ── 1. Wake up ──────────────────────────────────────────
+        print("[1] Waking up device...")
+        await send_cmd(client, write_char, "WAKE_UP")
+
+        # ── 2. Switch to MCU_MODE for clean responses ───────────
+        print("[2] Setting MCU_MODE (terse output)...")
+        await send_cmd(client, write_char, "MCU_MODE")
+
+        # ── 3. Configure vibration parameters ───────────────────
+        print("[3] Setting frequency...")
+        await send_cmd(client, write_char, f"SET_FREQ {FREQ}")
+
+        print("[4] Setting amplitude (effect 1)...")
+        await send_cmd(client, write_char, f"SET_AMP1 {AMP1}")
+
+        print("[5] Setting ON time...")
+        await send_cmd(client, write_char, f"SET_ON_TIME {SET_ON_TIME}")
+
+        print("[6] Setting OFF time...")
+        await send_cmd(client, write_char, f"SET_OFF_TIME {SET_OFF_TIME}")
+
+        print("[7] Setting cycle count...")
+        await send_cmd(client, write_char, f"SET_ONE_CYC {SET_ONE_CYC}")
+
+        # ── 4. Verify settings ───────────────────────────────────
+        print("[8] Querying settings...")
+        await send_cmd(client, write_char, "ASK_FREQ")
+        await send_cmd(client, write_char, "ASK_AMP")
+        await send_cmd(client, write_char, "ASK_ON_TIME")
+        await send_cmd(client, write_char, "ASK_OFF_TIME")
+        await send_cmd(client, write_char, "ASK_ONE_CYC")
+
+        # ── 5. Trigger vibration ─────────────────────────────────
+        print("\n[9] Triggering vibration (GO)...")
+        await send_cmd(client, write_char, "GO", delay=1.0)
+        print("✓ Vibration triggered!\n")
+
+        # Optional: trigger again after a pause
+        await asyncio.sleep(1.0)
+        print("[10] Second vibration burst...")
+        await send_cmd(client, write_char, "GO", delay=1.0)
+
+        # ── 6. Sleep when done ───────────────────────────────────
+        print("[11] Sending SLEEP...")
+        await send_cmd(client, write_char, "SLEEP")
+
+        if notify_char:
+            await client.stop_notify(notify_char)
+
+        print("\n✓ Done.")
 
 if __name__ == "__main__":
     print("=" * 50)
-    print("Bluetooth 设备通信测试")
+    print("JW-BLE-DL500 Vibration Test")
     print("=" * 50 + "\n")
-    
-    asyncio.run(scan_and_test())
+    asyncio.run(vibrate())
