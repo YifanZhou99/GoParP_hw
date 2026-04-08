@@ -2,18 +2,25 @@ import serial
 import subprocess
 import sys
 import time
+from robot_arm_control import RobotArmController
 
-PORT = "/dev/ttyACM1"
+controller = RobotArmController(
+        host="192.168.1.1",
+        port=80,
+        session_id="JfLiwMiyU6zz802mJi48Ylw1N7MfGV1n4t8lEfa0XignprdBtBNK4KIgM4PG449tCx90icNy8dzppew0f9AFxquIq80hSFdD0bylfK400XC80NmdYoOnONbugA0QwSH"
+    )
+
+PORT = "/dev/ttyACM0"
 BAUD = 9600
 SOUND_1 = "/home/yifzhou/Arduino/media/parp_sound.mp3"
-SOUND_2 = "/home/yifzhou/Arduino/media/parp_sound_9s.mp3"
+SOUND_2 = "/home/yifzhou/Arduino/media/parp_sound.mp3"
 
 NUM_SENSORS = 5
 SENSORS = [f"SENSOR{i+1}" for i in range(NUM_SENSORS)]
 
 FSR_THRESHOLD = 500
 HOLD_1 = 1.0
-HOLD_2 = 5.0
+HOLD_2 = 3.0
 
 
 def play(sound):
@@ -81,8 +88,11 @@ def main():
                 
                 if elapsed >= HOLD_2 and not alerted2:
                     print(f"  --> ALERT2 from {SENSORS[current_max_sensor-1]}")
+                    controller.head_hammer(repeats=1, speed=100)
+                    print(f"  Head hammer complete!")
                     play(SOUND_2)
                     alerted2 = True
+                    
                 elif elapsed >= HOLD_1 and not alerted1:
                     print(f"  --> ALERT1 from {SENSORS[current_max_sensor-1]}")
                     play(SOUND_1)
