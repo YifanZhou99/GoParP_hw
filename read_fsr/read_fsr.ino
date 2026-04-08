@@ -27,5 +27,5 @@
     Serial.print("  FSR5: ");
     Serial.println(fsr5Value);
                                                                                 
-    delay(10);   
+    delay(5);   
   }
