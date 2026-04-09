@@ -71,13 +71,22 @@ class MotorController:
         await _set_param(self._client, self._write_char, "SET_ONF_CYC",  ONF_CYC)
         print("[motor] Connected and configured.")
 
-    async def trigger(self):
-        """Fire one vibration burst. Reconnects automatically if dropped."""
+    async def trigger(self, cycles=None):
+        """Fire one vibration burst. Reconnects automatically if dropped.
+
+        Args:
+            cycles: Override ONF_CYC for this burst (None = use configured default).
+                    E.g. cycles=20 for a ~6-second long vibration.
+        """
         if self._client is None or not self._client.is_connected:
             print("[motor] Reconnecting...")
             await self.connect()
+        if cycles is not None:
+            await _set_param(self._client, self._write_char, "SET_ONF_CYC", cycles)
         await _write(self._client, self._write_char, "WAKE_UP", delay=0.5)
         await _write(self._client, self._write_char, "GO", delay=1.0)
+        if cycles is not None:
+            await _set_param(self._client, self._write_char, "SET_ONF_CYC", ONF_CYC)
 
     async def disconnect(self):
         if self._client and self._client.is_connected:

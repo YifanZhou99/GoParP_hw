@@ -127,7 +127,7 @@ def hammer_async():
         with _hammer_lock:
             _is_hammering = True
             try:
-                controller.head_hammer(repeats=3, speed=ARM_SPEED, from_ready=True)
+                controller.head_hammer(repeats=1, speed=ARM_SPEED, from_ready=True)
                 print("[arm] Hammer complete.")
             except Exception as e:
                 print(f"[arm] Hammer failed: {e}")
