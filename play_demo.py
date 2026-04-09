@@ -19,6 +19,7 @@ Reset: person stands up → cancel pending timers, reset state.
 """
 
 import asyncio
+import glob
 import random
 import serial
 import subprocess
@@ -41,16 +42,17 @@ ARM_READY   = {"x": "103", "y": "116", "z": "37", "b": "33", "e": "55"}
 ARM_SPEED   = 200
 
 # ── Media ─────────────────────────────────────────────────────────────────────
-MEDIA = "/home/yifzhou/Arduino/media"
-SOUND_FART       = f"{MEDIA}/parp_sound.mp3"
-VOICE_SITTING    = f"{MEDIA}/您还坐着呢.m4a"
-MUSIC_PLAYLIST   = [
-    f"{MEDIA}/parp_sound_9s.mp3",
-    f"{MEDIA}/parp_32s.mp3",
+MEDIA       = "/home/yifzhou/Arduino/media"
+FART_SOUNDS = "/home/yifzhou/Arduino/media/fart_sound"
+SOUNDS_FART_SHORT = [
+    f"{FART_SOUNDS}/fart_quick.mp3",
+    f"{FART_SOUNDS}/fart_wet.mp3",
 ]
+VOICE_SITTING    = f"{MEDIA}/audio/您还坐着呢.m4a"
+MUSIC_PLAYLIST   = glob.glob(f"{FART_SOUNDS}/放屁_*.mp3")
 VOICES_STANDUP   = [
-    f"{MEDIA}/上海话你站起来.m4a",
-    f"{MEDIA}/北京话站起来走.m4a",
+    f"{MEDIA}/audio/上海话你站起来.m4a",
+    f"{MEDIA}/audio/北京话站起来走.m4a",
 ]
 
 # ── FSR ───────────────────────────────────────────────────────────────────────
@@ -70,17 +72,42 @@ _phase3_timer: threading.Timer | None = None
 _arm_ready    = False   # set True after phase-2 arm init succeeds
 _is_hammering = False
 _hammer_lock  = threading.Lock()
+_stop_flag    = False   # set True on stood-up to abort ongoing actions
+
+_active_procs: list[subprocess.Popen] = []
+_procs_lock   = threading.Lock()
 
 
 # ── Helpers: sound ─────────────────────────────────────────────────────────────
 
+def _ffplay(path, timeout=60):
+    """Run ffplay, register process so it can be killed on stood-up."""
+    proc = subprocess.Popen(
+        ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", path],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    with _procs_lock:
+        _active_procs.append(proc)
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.terminate()
+    finally:
+        with _procs_lock:
+            _active_procs.discard(proc) if hasattr(_active_procs, "discard") else None
+            if proc in _active_procs:
+                _active_procs.remove(proc)
+
+
 def play_async(path):
-    def _play():
-        subprocess.run(
-            ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", path],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60,
-        )
-    threading.Thread(target=_play, daemon=True).start()
+    threading.Thread(target=_ffplay, args=(path,), daemon=True).start()
+
+
+def stop_all_audio():
+    with _procs_lock:
+        for proc in list(_active_procs):
+            proc.terminate()
+        _active_procs.clear()
 
 
 # ── Helpers: motor ─────────────────────────────────────────────────────────────
@@ -128,8 +155,16 @@ def hammer_async():
         with _hammer_lock:
             _is_hammering = True
             try:
-                arm.head_hammer(repeats=3, speed=ARM_SPEED, from_ready=_arm_ready)
-                print("[arm] Hammer complete.")
+                for i in range(3):
+                    if _stop_flag:
+                        print("[arm] Hammer aborted.")
+                        break
+                    arm.head_hammer(
+                        repeats=1, speed=ARM_SPEED,
+                        from_ready=(_arm_ready and i == 0),
+                    )
+                else:
+                    print("[arm] Hammer complete.")
             except Exception as e:
                 print(f"[arm] Hammer failed: {e}")
             finally:
@@ -143,7 +178,7 @@ def hammer_async():
 def _phase1():
     """Sitting detected — immediate response."""
     print("\n[PHASE 1] Sitting detected")
-    play_async(SOUND_FART)
+    play_async(random.choice(SOUNDS_FART_SHORT))
     vibrate_short()
 
 
@@ -162,16 +197,9 @@ def _phase3():
     music = random.choice(MUSIC_PLAYLIST)
 
     def _sequence():
-        # 1. Voice first
-        subprocess.run(
-            ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", voice],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15,
-        )
-        # 2. Music after voice finishes
-        subprocess.run(
-            ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", music],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60,
-        )
+        _ffplay(voice, timeout=15)          # 1. Voice first
+        if not _stop_flag:
+            _ffplay(music, timeout=60)      # 2. Music after voice, if not stopped
 
     threading.Thread(target=_sequence, daemon=True).start()
     vibrate_long()
@@ -190,7 +218,8 @@ def _cancel_timers():
 
 
 def on_sitting():
-    global _phase2_timer, _phase3_timer, _arm_ready
+    global _phase2_timer, _phase3_timer, _arm_ready, _stop_flag
+    _stop_flag = False
     _arm_ready = False
     _cancel_timers()
     _phase1()
@@ -201,8 +230,11 @@ def on_sitting():
 
 
 def on_stood_up():
-    print("\n[RESET] Person stood up — cancelling pending phases.")
+    global _stop_flag
+    print("\n[RESET] Person stood up — stopping all actions.")
+    _stop_flag = True
     _cancel_timers()
+    stop_all_audio()
 
 
 # ── FSR parsing ────────────────────────────────────────────────────────────────
